@@ -16,45 +16,38 @@
 
 #define LOG_TAG "hardware.shift.light@1.0-service"
 
-#include <hardware/lights.h>
-#include <hidl/LegacySupport.h>
-#include <hardware/shift/light/1.0/ILight.h>
+#include <android-base/logging.h>
+#include <hidl/HidlTransportSupport.h>
+
+#include "Light.h"
 #include "LightExt.h"
-
-namespace android {
-namespace hardware {
-namespace light {
-namespace V2_0 {
-namespace implementation {
-
-extern ILight* HIDL_FETCH_ILight(const char* /* name */);
-
-}  // namespace implementation
-}  // namespace V2_0
-}  // namespace light
-}  // namespace hardware
-}  // namespace android
 
 using android::hardware::configureRpcThreadpool;
 using android::hardware::joinRpcThreadpool;
+
+using android::hardware::light::V2_0::implementation::Light;
+using hardware::shift::light::V1_0::ILight;
 using hardware::shift::light::V1_0::implementation::LightExt;
-using hwLight = hardware::shift::light::V1_0::ILight;
 
 int main() {
-  ALOGI("SHIFT Light HAL is starting up");
+    ALOGI("SHIFT Light HAL service is starting up");
 
-  configureRpcThreadpool(1, true /*willJoinThreadpool*/);
+    android::sp<ILight> service = new LightExt {
+        new Light()
+    };
 
-  android::sp<hwLight> light = new LightExt {
-    android::hardware::light::V2_0::implementation::HIDL_FETCH_ILight(nullptr)
-  };
-  auto ret = light->registerAsService();
-  if (ret != android::OK) {
-    ALOGE("Failed to register SHIFT Light HAL as service, ret=%d", ret);
+    configureRpcThreadpool(1, true);
+
+    android::status_t status = service->registerAsService();
+    if (status != android::OK) {
+        LOG(ERROR) << "Cannot register Light HAL service.";
+        return 1;
+    }
+
+    LOG(INFO) << "SHIFT Light HAL service ready.";
+
+    joinRpcThreadpool();
+
+    LOG(ERROR) << "SHIFT Light HAL service failed to join thread pool.";
     return 1;
-  }
-  joinRpcThreadpool();
-
-  ALOGI("SHIFT Light HAL is shutting down");
-  return 1;
 }

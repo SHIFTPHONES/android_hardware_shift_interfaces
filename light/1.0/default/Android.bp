@@ -23,11 +23,13 @@ cc_defaults {
         "LightExt.cpp",
     ],
     shared_libs: [
-        "liblog",
         "libbase",
-        "libutils",
         "libhardware",
         "libhidlbase",
+        "libhidltransport",
+        "liblog",
+        "libhwbinder",
+        "libutils",
         "android.hardware.light@2.0",
         "hardware.shift.light@1.0",
     ],
@@ -46,9 +48,6 @@ cc_library_shared {
     defaults: [
         "hardware.shift.light_defaults",
         "hidl_defaults"
-    ],
-    srcs: [
-        "impl.cpp",
     ],
 }
 

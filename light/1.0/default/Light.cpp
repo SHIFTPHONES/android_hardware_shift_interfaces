@@ -16,11 +16,10 @@
 
 #define LOG_TAG "SHIFT-Light"
 
-#include <log/log.h>
-
-#include <stdio.h>
-
 #include "Light.h"
+#include <android-base/logging.h>
+#include <android-base/stringprintf.h>
+#include <fstream>
 
 namespace android {
 namespace hardware {
@@ -28,145 +27,161 @@ namespace light {
 namespace V2_0 {
 namespace implementation {
 
-static_assert(LIGHT_FLASH_NONE == static_cast<int>(Flash::NONE),
-              "Flash::NONE must match legacy value.");
-static_assert(LIGHT_FLASH_TIMED == static_cast<int>(Flash::TIMED),
-              "Flash::TIMED must match legacy value.");
-static_assert(LIGHT_FLASH_HARDWARE == static_cast<int>(Flash::HARDWARE),
-              "Flash::HARDWARE must match legacy value.");
+/*
+ * Write value to path and close file.
+ */
+template <typename T>
+static void set(const std::string& path, const T& value) {
+    std::ofstream file(path);
+    file << value;
+}
 
-static_assert(BRIGHTNESS_MODE_USER == static_cast<int>(Brightness::USER),
-              "Brightness::USER must match legacy value.");
-static_assert(BRIGHTNESS_MODE_SENSOR == static_cast<int>(Brightness::SENSOR),
-              "Brightness::SENSOR must match legacy value.");
-static_assert(BRIGHTNESS_MODE_LOW_PERSISTENCE ==
-                  static_cast<int>(Brightness::LOW_PERSISTENCE),
-              "Brightness::LOW_PERSISTENCE must match legacy value.");
+template <typename T>
+static T get(const std::string& path, const T& def) {
+    std::ifstream file(path);
+    T result;
 
-Light::Light(std::map<Type, light_device_t*>&& lights)
-    : mLights(std::move(lights)) {}
+    file >> result;
+    return file.fail() ? def : result;
+}
+
+static int rgbToBrightness(const LightState& state) {
+    int color = state.color & 0x00ffffff;
+    return ((77 * ((color >> 16) & 0x00ff))
+            + (150 * ((color >> 8) & 0x00ff))
+            + (29 * (color & 0x00ff))) >> 8;
+}
+
+Light::Light() {
+    mLights.emplace(Type::ATTENTION, std::bind(&Light::handleRgb, this, std::placeholders::_1, 0));
+    mLights.emplace(Type::BACKLIGHT, std::bind(&Light::handleBacklight, this, std::placeholders::_1));
+    mLights.emplace(Type::BATTERY, std::bind(&Light::handleRgb, this, std::placeholders::_1, 1));
+    mLights.emplace(Type::NOTIFICATIONS, std::bind(&Light::handleRgb, this, std::placeholders::_1, 2));
+}
+
+void Light::handleBacklight(const LightState& state) {
+    int maxBrightness = get("/sys/class/backlight/panel0-backlight/max_brightness", -1);
+    if (maxBrightness < 0) {
+        maxBrightness = 255;
+    }
+    int sentBrightness = rgbToBrightness(state);
+    int brightness = sentBrightness * maxBrightness / 255;
+    LOG(DEBUG) << "Writing backlight brightness " << brightness
+               << " (orig " << sentBrightness << ")";
+    set("/sys/class/backlight/panel0-backlight/brightness", brightness);
+}
+
+void Light::handleRgb(const LightState& state, size_t index) {
+    mLightStates.at(index) = state;
+
+    LightState stateToUse = mLightStates.front();
+    for (const auto& lightState : mLightStates) {
+        if (lightState.color & 0xffffff) {
+            stateToUse = lightState;
+            break;
+        }
+    }
+
+    std::map<std::string, int> colorValues;
+    colorValues["red"] = (stateToUse.color >> 16) & 0xff;
+    // lower green and blue brightness to adjust for the (lower) brightness of red
+    colorValues["green"] = ((stateToUse.color >> 8) & 0xff) / 2;
+    colorValues["blue"] = (stateToUse.color & 0xff) / 2;
+
+    int onMs = stateToUse.flashMode == Flash::TIMED ? stateToUse.flashOnMs : 0;
+    int offMs = stateToUse.flashMode == Flash::TIMED ? stateToUse.flashOffMs : 0;
+
+    // LUT has 63 entries, we could theoretically use them as 3 (colors) * 21 (steps).
+    // However, the last LUT entries don't seem to behave correctly for unknown
+    // reasons, so we use 17 steps for a total of 51 LUT entries only.
+    static constexpr int kRampSteps = 16;
+    static constexpr int kRampMaxStepDurationMs = 15;
+
+    auto makeLedPath = [](const std::string& led, const std::string& op) -> std::string {
+        return "/sys/class/leds/" + led + "/" + op;
+    };
+    auto getScaledDutyPercent = [](int brightness) -> std::string {
+        std::string output;
+        for (int i = 0; i <= kRampSteps; i++) {
+            if (i != 0) {
+                output += ",";
+            }
+            output += std::to_string(i * 512 * brightness / (255 * kRampSteps));
+        }
+        return output;
+    };
+
+    // Disable all blinking before starting
+    for (const auto& entry : colorValues) {
+        set(makeLedPath(entry.first, "blink"), 0);
+    }
+
+    if (onMs > 0 && offMs > 0) {
+        int pauseLo, pauseHi, stepDuration, index = 0;
+        if (kRampMaxStepDurationMs * kRampSteps > onMs) {
+            stepDuration = onMs / kRampSteps;
+            pauseHi = 0;
+            pauseLo = offMs;
+        } else {
+            stepDuration = kRampMaxStepDurationMs;
+            pauseHi = onMs - kRampSteps * stepDuration;
+            pauseLo = offMs - kRampSteps * stepDuration;
+        }
+
+        for (const auto& entry : colorValues) {
+            set(makeLedPath(entry.first, "lut_flags"), 95);
+            set(makeLedPath(entry.first, "start_idx"), index);
+            set(makeLedPath(entry.first, "duty_pcts"), getScaledDutyPercent(entry.second));
+            set(makeLedPath(entry.first, "pause_lo"), pauseLo);
+            set(makeLedPath(entry.first, "pause_hi"), pauseHi);
+            set(makeLedPath(entry.first, "ramp_step_ms"), stepDuration);
+            index += kRampSteps + 1;
+        }
+
+        // Start blinking
+        for (const auto& entry : colorValues) {
+            set(makeLedPath(entry.first, "blink"), entry.second);
+        }
+    } else {
+        for (const auto& entry : colorValues) {
+            set(makeLedPath(entry.first, "brightness"), entry.second);
+        }
+    }
+
+    LOG(DEBUG) << base::StringPrintf(
+        "handleRgb: mode=%d, color=%08X, onMs=%d, offMs=%d",
+        static_cast<std::underlying_type<Flash>::type>(stateToUse.flashMode), stateToUse.color,
+        onMs, offMs);
+}
 
 // Methods from ::android::hardware::light::V2_0::ILight follow.
 Return<Status> Light::setLight(Type type, const LightState& state) {
-  auto it = mLights.find(type);
+    auto it = mLights.find(type);
 
-  if (it == mLights.end()) return Status::LIGHT_NOT_SUPPORTED;
+    if (it == mLights.end()) {
+        return Status::LIGHT_NOT_SUPPORTED;
+    }
 
-  light_device_t* hwLight = it->second;
+    /*
+     * Lock global mutex until light state is updated.
+     */
+    std::lock_guard<std::mutex> lock(mLock);
 
-  light_state_t legacyState{
-      .color = state.color,
-      .flashMode = static_cast<int>(state.flashMode),
-      .flashOnMS = state.flashOnMs,
-      .flashOffMS = state.flashOffMs,
-      .brightnessMode = static_cast<int>(state.brightnessMode),
-  };
+    it->second(state);
 
-  int ret = hwLight->set_light(hwLight, &legacyState);
-
-  switch (ret) {
-    case -ENOSYS:
-      return Status::BRIGHTNESS_NOT_SUPPORTED;
-    case 0:
-      return Status::SUCCESS;
-    default:
-      return Status::UNKNOWN;
-  }
+    return Status::SUCCESS;
 }
 
 Return<void> Light::getSupportedTypes(getSupportedTypes_cb _hidl_cb) {
-  std::vector<Type> types(mLights.size());
+    std::vector<Type> types;
 
-  int idx = 0;
-  for (const auto& pair : mLights) {
-    types[idx++] = pair.first;
-  }
+    for (auto const& light : mLights) {
+        types.push_back(light.first);
+    }
 
-  hidl_vec<Type> hidl_types{};
-  hidl_types.setToExternal(types.data(), types.size());
+    _hidl_cb(types);
 
-  _hidl_cb(hidl_types);
-
-  return Void();
-}
-
-static const std::map<Type, const char*> kLogicalLights = {
-    {Type::BACKLIGHT, LIGHT_ID_BACKLIGHT},
-    //{Type::KEYBOARD, LIGHT_ID_KEYBOARD},
-    //{Type::BUTTONS, LIGHT_ID_BUTTONS},
-    {Type::BATTERY, LIGHT_ID_BATTERY},
-    {Type::NOTIFICATIONS, LIGHT_ID_NOTIFICATIONS},
-    {Type::ATTENTION, LIGHT_ID_ATTENTION},
-    //{Type::BLUETOOTH, LIGHT_ID_BLUETOOTH},
-    //{Type::WIFI, LIGHT_ID_WIFI}
-};
-
-Return<void> Light::debug(const hidl_handle& handle,
-                          const hidl_vec<hidl_string>& /* options */) {
-  if (handle == nullptr || handle->numFds < 1) {
-    ALOGE("debug called with no handle\n");
     return Void();
-  }
-
-  int fd = handle->data[0];
-  if (fd < 0) {
-    ALOGE("invalid FD: %d\n", handle->data[0]);
-    return Void();
-  }
-
-  dprintf(fd, "The following lights are registered: ");
-  for (const auto& pair : mLights) {
-    const Type type = pair.first;
-    dprintf(fd, "%s,", kLogicalLights.at(type));
-  }
-  dprintf(fd, ".\n");
-  fsync(fd);
-  return Void();
-}
-
-light_device_t* getLightDevice(const char* name) {
-  light_device_t* lightDevice;
-  const hw_module_t* hwModule = NULL;
-
-  int ret = hw_get_module(LIGHTS_HARDWARE_MODULE_ID, &hwModule);
-  if (ret == 0) {
-    ret = hwModule->methods->open(
-        hwModule, name, reinterpret_cast<hw_device_t**>(&lightDevice));
-    if (ret != 0)
-      ALOGE("light_open %s %s failed: %d", LIGHTS_HARDWARE_MODULE_ID, name,
-            ret);
-  } else {
-    ALOGE("hw_get_module %s %s failed: %d", LIGHTS_HARDWARE_MODULE_ID, name,
-          ret);
-  }
-
-  if (ret == 0) {
-    return lightDevice;
-  } else {
-    ALOGE("Light passthrough failed to load legacy HAL.");
-    return nullptr;
-  }
-}
-
-ILight* HIDL_FETCH_ILight(const char* /* name */) {
-  std::map<Type, light_device_t*> lights;
-
-  for (const auto& pair : kLogicalLights) {
-    Type type = pair.first;
-    const char* name = pair.second;
-
-    light_device_t* light = getLightDevice(name);
-
-    if (light != nullptr) lights[type] = light;
-  }
-
-  if (lights.size() == 0) {
-    // Log information, but still return new Light.
-    // Some devices may not have any lights.
-    ALOGI("Could not open any lights.");
-  }
-
-  return new Light(std::move(lights));
 }
 
 }  // namespace implementation

@@ -18,11 +18,10 @@
 #define ANDROID_HARDWARE_LIGHT_V2_0_LIGHT_H
 
 #include <android/hardware/light/2.0/ILight.h>
-#include <hardware/hardware.h>
 #include <hardware/lights.h>
-#include <hidl/MQDescriptor.h>
 #include <hidl/Status.h>
-#include <map>
+#include <unordered_map>
+#include <mutex>
 
 namespace android {
 namespace hardware {
@@ -30,25 +29,29 @@ namespace light {
 namespace V2_0 {
 namespace implementation {
 
-using ::android::hardware::hidl_string;
-using ::android::hardware::hidl_vec;
 using ::android::hardware::Return;
+using ::android::hardware::Void;
+using ::android::hardware::hidl_vec;
 using ::android::hardware::light::V2_0::ILight;
 using ::android::hardware::light::V2_0::LightState;
 using ::android::hardware::light::V2_0::Status;
 using ::android::hardware::light::V2_0::Type;
 
-struct Light : public ILight {
-  Light(std::map<Type, light_device_t*>&& lights);
+class Light : public ILight {
+  public:
+    Light();
 
-  Return<Status> setLight(Type type, const LightState& state) override;
-  Return<void> getSupportedTypes(getSupportedTypes_cb _hidl_cb) override;
+    // Methods from ::android::hardware::light::V2_0::ILight follow.
+    Return<Status> setLight(Type type, const LightState& state) override;
+    Return<void> getSupportedTypes(getSupportedTypes_cb _hidl_cb) override;
 
-  Return<void> debug(const hidl_handle& handle,
-                     const hidl_vec<hidl_string>& options) override;
+  private:
+    void handleBacklight(const LightState& state);
+    void handleRgb(const LightState& state, size_t index);
 
- private:
-  std::map<Type, light_device_t*> mLights;
+    std::mutex mLock;
+    std::unordered_map<Type, std::function<void(const LightState&)>> mLights;
+    std::array<LightState, 3> mLightStates;
 };
 
 }  // namespace implementation
