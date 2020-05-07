@@ -32,9 +32,7 @@ using hardware::shift::light::V1_0::implementation::LightExt;
 int main() {
     ALOGI("SHIFT Light HAL service is starting up");
 
-    android::sp<ILight> service = new LightExt {
-        new Light()
-    };
+    android::sp<ILight> service = new LightExt(new Light());
 
     configureRpcThreadpool(1, true);
 

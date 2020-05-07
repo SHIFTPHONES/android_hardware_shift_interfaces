@@ -52,29 +52,31 @@ constexpr const char kTorchOneBrightnessNode[] =
 constexpr const char kTorchOneTriggerNode[] =
     "/sys/class/leds/led:torch_1/trigger";
 
-struct LightExt : public ::hardware::shift::light::V1_0::ILight {
-  LightExt(HwILight*&& light) : mLight(light) {
-    mHasSwitchNode = !access(kSwitchBrightnessNode, F_OK);
-    mHasTorchZeroNode = !access(kTorchZeroBrightnessNode, F_OK) && !access(kTorchZeroTriggerNode, F_OK);
-    mHasTorchOneNode = !access(kTorchOneBrightnessNode, F_OK) && !access(kTorchOneTriggerNode, F_OK);
-  };
+class LightExt : public ::hardware::shift::light::V1_0::ILight {
+  public:
+    LightExt(HwILight*&& light) : mLight(light) {
+        mHasSwitchNode = !access(kSwitchBrightnessNode, F_OK);
+        mHasTorchZeroNode = !access(kTorchZeroBrightnessNode, F_OK) && !access(kTorchZeroTriggerNode, F_OK);
+        mHasTorchOneNode = !access(kTorchOneBrightnessNode, F_OK) && !access(kTorchOneTriggerNode, F_OK);
+    };
 
-  // Methods from ::android::hardware::light::V2_0::ILight follow.
-  Return<Status> setLight(Type type, const LightState& state) override;
-  Return<void> getSupportedTypes(getSupportedTypes_cb _hidl_cb) override {
-    return mLight->getSupportedTypes(_hidl_cb);
-  }
+    // Methods from ::android::hardware::light::V2_0::ILight follow.
+    Return<Status> setLight(Type type, const LightState& state) override;
+    Return<void> getSupportedTypes(getSupportedTypes_cb _hidl_cb) override {
+        return mLight->getSupportedTypes(_hidl_cb);
+    }
 
-  // Methods from ::hardware::shift::light::V1_0::ILight follow.
-  Return<Status> setTorchLight(Torch torch, const LightState& state) override;
+    // Methods from ::hardware::shift::light::V1_0::ILight follow.
+    Return<Status> setTorchLight(Torch torch, const LightState& state) override;
 
- private:
-  std::unique_ptr<HwILight> mLight;
-  Return<Status> applyTorchLight(Torch torch, const LightState& state);
-  bool mHasSwitchNode = false;
-  bool mHasTorchZeroNode = false;
-  bool mHasTorchOneNode = false;
+  private:
+    std::unique_ptr<HwILight> mLight;
+    Return<Status> applyTorchLight(Torch torch, const LightState& state);
+    bool mHasSwitchNode = false;
+    bool mHasTorchZeroNode = false;
+    bool mHasTorchOneNode = false;
 };
+
 }  // namespace implementation
 }  // namespace V1_0
 }  // namespace light
